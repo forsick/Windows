@@ -108,9 +108,9 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             payload_header_end = start + payload_header_length
 
             start -= 1
-            (row_id, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
-            # can't have a negative row_id (index)
-            if row_id < 0:
+            (index, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            # can't have a negative index (index)
+            if index < 0:
                 continue
 
             start -= varint_len
@@ -166,15 +166,15 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
                 favicon_id = sqlite_help.sql_unpack(chrome_buff[start:start + favicon_id_length])
 
             urls[int(offset)] = (
-            str(url), str(title), int(visit_count), int(typed_count), last_visit_time)
+                int(index), str(url), str(title), int(visit_count), int(typed_count), last_visit_time)
 
         for url in urls.values():
-            yield 0, (url[0], url[1], url[2], url[3], str(url[4]))
+            yield 0, (url[0], url[1], url[2], url[3], url[4], str(url[5]))
 
     def _generator(self):
         for item in self.calculate():
             yield item
 
     def run(self):
-        return renderers.TreeGrid([("URL", str), ("Title", str), ("Visit Count", int),
+        return renderers.TreeGrid([("Index", int), ("URL", str), ("Title", str), ("Visit Count", int),
                                    ("Typed Count", int), ("Last Visit Time", str)], self._generator())
