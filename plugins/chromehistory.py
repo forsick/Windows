@@ -1,7 +1,3 @@
-import binascii
-import csv
-
-import volatility3.framework.objects.utility as utils
 import volatility3.framework.layers.scanners as scan
 from volatility3.framework.configuration import requirements
 from volatility3.framework import constants
@@ -17,84 +13,6 @@ constants.version = (2, 0, 0)
 
 FORWARD = sqlite_help.FORWARD
 BACKWARD = sqlite_help.BACKWARD
-
-# Function to get rid of padding
-def clean(x):
-    """Strip the padding from the end of the AES decrypted string"""
-    return x[:-x[-1]]
-
-def decrypt_cookie_value(x, key):
-    """Decrypts a cookie using the key provided"""
-    encrypted_value = x
-
-    # Trim off the 'v10' that Chrome/ium prepends
-    encrypted_value = encrypted_value[3:]
-
-    # Default values used by both Chrome and Chromium in OSX and Linux
-    iv = b' ' * 16
-
-    cipher = AES.new(key, AES.MODE_CBC, IV=iv)
-
-    if len(encrypted_value) % 16:
-        return "INVALID_ENCRYPTED_LENGTH"
-    decrypted = cipher.decrypt(encrypted_value)
-    return clean(decrypted)
-
-# The visits table has a 32 bit integer with different bits representing different page transitions
-# details at https://github.com/jedesah/Chromium/blob/master/content/public/common/page_transition_types.h
-# or https://developer.chrome.com/extensions/history
-def map_transition(t):
-    """Map the 32-bit integer transition t to the multiple transition types it represents"""
-    transition = ""
-    if (t & 0xFF) == 0:
-        transition += "LINK;"
-    if (t & 0xFF) == 1:
-        transition += "TYPED;"
-    if (t & 0xFF) == 2:
-        transition += "BOOKMARK;"
-    if (t & 0xFF) == 3:
-        transition += "AUTO_SUBFRAME;"
-    if (t & 0xFF) == 4:
-        transition += "MANUAL_SUBFRAME;"
-    if (t & 0xFF) == 5:
-        transition += "GENERATED;"
-    if (t & 0xFF) == 6:
-        transition += "START_PAGE;"
-    if (t & 0xFF) == 7:
-        transition += "FORM_SUBMIT;"
-    if (t & 0xFF) == 8:
-        transition += "RELOAD-RESTORE-UNDO_CLOSE;"
-    if (t & 0xFF) == 9:
-        transition += "KEYWORD;"
-    if (t & 0xFF) == 10:
-        transition += "KEYWORD_GENERATED;"
-
-    if (t & 0x03000000) == 0x03000000:
-        transition += "FORWARD_BACK_FROM_ADDRESS_BAR;"
-    elif (t & 0x03000000) == 0x01000000:
-        transition += "FORWARD_BACK;"
-    elif (t & 0x03000000) == 0x02000000:
-        transition += "FROM_ADDRESS_BAR;"
-
-    if (t & 0x04000000) == 0x04000000:
-        transition += "HOME_PAGE;"
-
-    if (t & 0x30000000) == 0x30000000:
-        transition += "CHAIN_START_END;"
-    elif (t & 0x30000000) == 0x10000000:
-        transition += "CHAIN_START;"
-    elif (t & 0x30000000) == 0x20000000:
-        transition += "CHAIN_END;"
-
-    if (t & 0xC0000000) == 0xC0000000:
-        transition += "CLIENT_SERVER_REDIRECT;"
-    elif (t & 0xC0000000) == 0x40000000:
-        transition += "CLIENT_REDIRECT;"
-    elif (t & 0xC0000000) == 0x80000000:
-        transition += "SERVER_REDIRECT;"
-
-    return transition
-
 
 class ChromeScanner(scan.MultiStringScanner):
     def __init__(self, needles=None):
