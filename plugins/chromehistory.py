@@ -130,7 +130,7 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
                 (favicon_id_length, favicon_id) = sqlite_help.varint_type_to_length(chrome_buff[start])
                 start += 1
 
-            url_id = sqlite_help.sql_unpack(chrome_buff[start:start + url_id_length])
+            # url_id = sqlite_help.sql_unpack(chrome_buff[start:start + url_id_length])
 
             start += url_id_length
             url = chrome_buff[start:start + url_length]
