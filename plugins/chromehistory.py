@@ -65,8 +65,6 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
                 continue
 
             start = 15
-            favicon_id = "N/A"
-            favicon_id_length = 0
 
             # start before the needle match and work backwards, do sanity checks on some values before proceeding
             if chrome_buff[start - 1] not in (1, 6):
@@ -122,15 +120,8 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             if payload_length < 6:
                 continue
 
-            # jump back to the index of the needle match
-            start = 15
-            (hidden_length, hidden) = sqlite_help.varint_type_to_length(chrome_buff[start])
-            start += 1
-            if start != payload_header_end:
-                (favicon_id_length, favicon_id) = sqlite_help.varint_type_to_length(chrome_buff[start])
-                start += 1
-
-            # url_id = sqlite_help.sql_unpack(chrome_buff[start:start + url_id_length])
+            # jump back to the index of the needle match + hidden_length(1)
+            start = 16
 
             start += url_id_length
             url = chrome_buff[start:start + url_length]
@@ -159,11 +150,6 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
                 continue
 
             start += last_visit_time_length
-            hidden = sqlite_help.sql_unpack(chrome_buff[start:start + hidden_length])
-
-            start += hidden_length
-            if favicon_id_length > 0:
-                favicon_id = sqlite_help.sql_unpack(chrome_buff[start:start + favicon_id_length])
 
             urls[int(offset)] = (
                 int(index), str(url), str(title), int(visit_count), int(typed_count), last_visit_time)
