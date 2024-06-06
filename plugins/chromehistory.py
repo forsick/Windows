@@ -1,12 +1,11 @@
 import volatility3.framework.layers.scanners as scan
 from volatility3.framework.configuration import requirements
 from volatility3.framework import constants
-from volatility3.framework import renderers
+from volatility3.framework import interfaces, renderers
 from volatility3.framework.exceptions import PagedInvalidAddressException
 
 # framework.plugin -> plugin
 import volatility3.plugins.sqlite_help as sqlite_help
-import volatility3.plugins.web_common as common
 
 # Set the version for the constants module
 constants.version = (2, 0, 0)
@@ -31,7 +30,8 @@ class ChromeScanner(scan.MultiStringScanner):
             yield scan.BytesScanner(needle)
 
 
-class ChromeHistory(common.AbstractWindowsCommand):
+# common.AbstractWindowsCommand
+class ChromeHistory(interfaces.plugins.PluginInterface):
     """ Scans for and parses potential Chrome url history"""
     _required_framework_version = (2, 0, 0)
     _version = (1, 0, 0)
