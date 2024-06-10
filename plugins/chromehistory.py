@@ -1,9 +1,8 @@
+import sys
 import volatility3.framework.layers.scanners as scan
 from volatility3.framework.configuration import requirements
 from volatility3.framework import interfaces, renderers
 from volatility3.framework.exceptions import PagedInvalidAddressException
-
-# framework.plugin -> plugin
 import volatility3.plugins.sqlite_help as sqlite_help
 
 FORWARD = sqlite_help.FORWARD
@@ -65,6 +64,8 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
                 continue
 
             start = 15
+            favicon_id = "N/A"
+            favicon_id_length = 0
 
             # start before the needle match and work backwards, do sanity checks on some values before proceeding
             if chrome_buff[start - 1] not in (1, 6):
@@ -106,9 +107,9 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             payload_header_end = start + payload_header_length
 
             start -= 1
-            (index, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
-            # can't have a negative index (index)
-            if index < 0:
+            (row_id, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            # can't have a negative row_id (index)
+            if row_id < 0:
                 continue
 
             start -= varint_len
@@ -120,8 +121,13 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             if payload_length < 6:
                 continue
 
-            # jump back to the index of the needle match + hidden_length(1)
-            start = 16
+            # jump back to the index of the needle match
+            start = 15
+            (hidden_length, hidden) = sqlite_help.varint_type_to_length(chrome_buff[start])
+            start += 1
+            if start != payload_header_end:
+                (favicon_id_length, favicon_id) = sqlite_help.varint_type_to_length(chrome_buff[start])
+                start += 1
 
             start += url_id_length
             url = chrome_buff[start:start + url_length]
@@ -150,17 +156,41 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
                 continue
 
             start += last_visit_time_length
+            hidden = sqlite_help.sql_unpack(chrome_buff[start:start + hidden_length])
 
-            urls[int(offset)] = (
-                int(index), str(url), str(title), int(visit_count), int(typed_count), last_visit_time)
+            start += hidden_length
+            if favicon_id_length > 0:
+                favicon_id = sqlite_help.sql_unpack(chrome_buff[start:start + favicon_id_length])
+
+            urls[int(offset)] = (int(row_id),
+                                str(url), str(title), int(visit_count), int(typed_count), last_visit_time)
 
         for url in urls.values():
-            yield 0, (url[0], url[1], url[2], url[3], url[4], str(url[5]))
+            yield url
 
     def _generator(self):
         for item in self.calculate():
             yield item
 
     def run(self):
-        return renderers.TreeGrid([("Index", int), ("URL", str), ("Title", str), ("Visit Count", int),
-                                   ("Typed Count", int), ("Last Visit Time", str)], self._generator())
+        data = list(self._generator())
+        self.render_text(sys.stdout, data)
+
+    def shorten_url(self, text, max_length):
+        if len(text) <= max_length:
+            return text
+        part_length = (max_length - 3) // 2
+        return text[:part_length] + '...' + text[-part_length:]
+
+    def render_text(self, outfd, data):
+        self.table_header(outfd, [("Index", "6"), ("URL", "80"), ("Title", "80"), ("Visits", "6"), ("Typed", "5"), ("Last Visit Time", "26")])
+        for index, url, title, visit_count, typed_count, last_visit_time in data:
+            shorten_url = self.shorten_url(url, 80)
+            self.table_row(outfd, index, shorten_url, title, visit_count, typed_count, str(last_visit_time))
+
+    def table_header(self, outfd, column_headers):
+        outfd.write(" | ".join(header[0].ljust(int(header[1])) for header in column_headers) + "\n")
+        outfd.write("-+-".join('-' * int(header[1]) for header in column_headers) + "\n")
+
+    def table_row(self, outfd, *columns):
+        outfd.write(" | ".join(str(col).ljust(len) for col, len in zip(columns, [6, 80, 80, 6, 5, 26])) + "\n")
