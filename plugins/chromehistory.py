@@ -30,7 +30,7 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             ),
         ]
 
-    def calculate(self):
+    def _generator(self):
         kernel = self.context.modules[self.config["kernel"]]
         physical_layer_name = self.context.layers[kernel.layer_name].config.get(
             "memory_layer", None
@@ -169,10 +169,6 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             if value not in seen_tuples:
                 seen_tuples.add(value)
                 yield 0, (value[0], value[1], value[2], value[3], value[4], value[5])
-
-    def _generator(self):
-        for item in self.calculate():
-            yield item
 
     def run(self):
         return renderers.TreeGrid(
