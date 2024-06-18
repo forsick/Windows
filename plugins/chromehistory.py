@@ -1,9 +1,10 @@
+import datetime
+
 import volatility3.framework.layers.scanners as scan
 from volatility3.framework.configuration import requirements
-from volatility3.framework import interfaces, renderers, symbols
+from volatility3.framework import interfaces, renderers
 from volatility3.framework.exceptions import PagedInvalidAddressException
 
-# framework.plugin -> plugin
 import volatility3.plugins.sqlite_help as sqlite_help
 
 FORWARD = sqlite_help.FORWARD
@@ -16,34 +17,41 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
     @classmethod
     def get_requirements(cls):
         return [
-            requirements.BooleanRequirement(name="nulltime", description="Don't print entries with null timestamps", default=False, optional=True),
-            requirements.ModuleRequirement(name="kernel", description="Memory layer for the kernel", architectures=["Intel32", "Intel64"]),
+            requirements.ModuleRequirement(
+                name="kernel", 
+                description="Memory layer for the kernel", 
+                architectures=["Intel32", "Intel64"]
+            ),
+            requirements.BooleanRequirement(
+                name="nulltime", 
+                description="Don't print entries with null timestamps", 
+                default=False, 
+                optional=True
+            ),
         ]
-
-    def __init__(self, context, config, *args, **kwargs):
-        super().__init__(context, config, *args, **kwargs)
 
     def calculate(self):
         kernel = self.context.modules[self.config["kernel"]]
         physical_layer_name = self.context.layers[kernel.layer_name].config.get(
             "memory_layer", None
         )
-
-        # Decide of Memory Dump Architecture
         layer = self.context.layers[physical_layer_name]
-        
-        needles=[b'\x08http', b'\x08file', b'\x08ftp',
-                                         b'\x08chrome',
-                                         b'\x08data',
-                                         b'\x08about',
-                                         b'\x01\x01http',
-                                         b'\x01\x01file',
-                                         b'\x01\x01ftp',
-                                         b'\x01\x01chrome',
-                                         b'\x01\x01data',
-                                         b'\x01\x01about',
-                                         ]
+        needles=[
+                    b'\x08http', 
+                    b'\x08file', 
+                    b'\x08ftp',
+                    b'\x08chrome',
+                    b'\x08data',
+                    b'\x08about',
+                    b'\x01\x01http',
+                    b'\x01\x01file',
+                    b'\x01\x01ftp',
+                    b'\x01\x01chrome',
+                    b'\x01\x01data',
+                    b'\x01\x01about',
+                ]
         urls = {}
+        
         for offset, _value in layer.scan(
             context=self.context,
             scanner=scan.MultiStringScanner(patterns=needles),
@@ -75,6 +83,7 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
 
             if not (0 < chrome_buff[start - 1] < 10):
                 continue
+
             start -= 1
             visit_count = None
             if chrome_buff[start] in (8, 9):
@@ -99,7 +108,7 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
 
             start -= 1
             (row_id, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
-            # can't have a negative row_id (index)
+            # We cannot have a negative row_id (index)
             if row_id < 0:
                 continue
 
@@ -120,7 +129,6 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
                 (favicon_id_length, favicon_id) = sqlite_help.varint_type_to_length(chrome_buff[start])
                 start += 1
 
-            # url_id = sqlite_help.sql_unpack(chrome_buff[start:start + url_id_length])
             start += url_id_length
             url = chrome_buff[start:start + url_length]
             url = url.decode('utf-8', errors='ignore')
@@ -146,7 +154,6 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             last_visit_time = sqlite_help.get_wintime_from_msec(last_visit_time)
             if last_visit_time.year == 1601 and self.config['nulltime'] == False:
                 continue
-
             start += last_visit_time_length
             hidden = sqlite_help.sql_unpack(chrome_buff[start:start + hidden_length])
 
@@ -157,13 +164,25 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             urls[int(offset)] = (int(row_id),
             str(url), str(title), int(visit_count), int(typed_count), last_visit_time)
             
-        for url in urls.values():
-            yield 0, (url[0], url[1], url[2], url[3], url[4], str(url[5]))
+        seen_tuples = set()
+        for value in urls.values():
+            if value not in seen_tuples:
+                seen_tuples.add(value)
+                yield 0, (value[0], value[1], value[2], value[3], value[4], value[5])
 
     def _generator(self):
         for item in self.calculate():
             yield item
 
     def run(self):
-        return renderers.TreeGrid([("Index", int), ("URL", str), ("Title", str), ("Visit Count", int),
-                                   ("Typed Count", int), ("Last Visit Time", str)], self._generator())
+        return renderers.TreeGrid(
+            [
+                ("Index", int), 
+                ("URL", str), 
+                ("Title", str), 
+                ("Visit Count", int),
+                ("Typed Count", int), 
+                ("Last Visit Time", datetime.datetime)
+            ], 
+            self._generator()
+        )
