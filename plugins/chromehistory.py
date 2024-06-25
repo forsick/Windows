@@ -11,7 +11,7 @@ FORWARD = sqlite_help.FORWARD
 BACKWARD = sqlite_help.BACKWARD
 
 class ChromeHistory(interfaces.plugins.PluginInterface):
-    """ Scans for and parses potential Chrome url history"""
+    """Scans for and parses potential Chrome url history"""
     _required_framework_version = (2, 0, 0)
 
     @classmethod
@@ -161,8 +161,14 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
             if favicon_id_length > 0:
                 favicon_id = sqlite_help.sql_unpack(chrome_buff[start:start + favicon_id_length])
 
-            urls[int(offset)] = (int(row_id),
-            str(url), str(title), int(visit_count), int(typed_count), last_visit_time)
+            urls[int(offset)] = (
+                                int(row_id),
+                                str(url), 
+                                str(title), 
+                                int(visit_count), 
+                                int(typed_count), 
+                                last_visit_time
+                                )
             
         seen_tuples = set()
         for value in urls.values():
@@ -179,6 +185,316 @@ class ChromeHistory(interfaces.plugins.PluginInterface):
                 ("Visit Count", int),
                 ("Typed Count", int), 
                 ("Last Visit Time", datetime.datetime)
+            ], 
+            self._generator()
+        )
+    
+class ChromeDownloads(interfaces.plugins.PluginInterface):
+    """Scans for and parses potential Chrome download records"""
+    _required_framework_version = (2, 0, 0)
+
+    @classmethod
+    def get_requirements(cls):
+        return [
+            requirements.ModuleRequirement(
+                name="kernel", 
+                description="Memory layer for the kernel", 
+                architectures=["Intel32", "Intel64"]
+            ),
+            requirements.BooleanRequirement(
+                name="nulltime", 
+                description="Don't print entries with null timestamps", 
+                default=False, 
+                optional=True
+            ),
+        ]
+
+    def _generator(self):
+        kernel = self.context.modules[self.config["kernel"]]
+        physical_layer_name = self.context.layers[kernel.layer_name].config.get(
+            "memory_layer", None
+        )
+        layer = self.context.layers[physical_layer_name]
+        needles=[
+                    b'\x01\x01\x01',
+                ]
+        downloads = {}
+        
+        for offset, _value in layer.scan(
+            context=self.context,
+            scanner=scan.MultiStringScanner(patterns=needles),
+        ):
+            try:
+                chrome_buff = layer.read(offset - 16, 3000)
+            except PagedInvalidAddressException as e:
+                print(f"Unable to read page at offset {offset}: {e}")
+                continue
+
+            start = 16
+            if chrome_buff[19] not in (1, 6) and chrome_buff[20] != 1:
+                continue
+
+            good = False
+
+            # get all of the single byte lengths around the needle
+            (start_time_length, start_time) = sqlite_help.varint_type_to_length(chrome_buff[start-3])
+            (received_bytes_length, received_bytes) = sqlite_help.varint_type_to_length(chrome_buff[start-2])
+            (total_bytes_length, total_bytes) = sqlite_help.varint_type_to_length(chrome_buff[start-1])
+            (state_length, state) = sqlite_help.varint_type_to_length(chrome_buff[start])
+            (danger_type_length, danger_type) = sqlite_help.varint_type_to_length(chrome_buff[start+1])
+            (interrupt_reason_length, intterupt_reason) = sqlite_help.varint_type_to_length(chrome_buff[start+2])
+            (end_time_length, end_time) = sqlite_help.varint_type_to_length(chrome_buff[start+3])
+            (opened_length, opened) = sqlite_help.varint_type_to_length(chrome_buff[start+4])
+
+            # go backwards from needle first
+            start -= 4
+
+            # times should be 8 bytes, might be 1 byte if time is empty, including 6 bytes just in case
+            if start_time_length not in (1, 6, 8) or end_time_length not in (1, 6, 8):
+                continue
+
+            if received_bytes_length not in range (0,7) or total_bytes_length not in range (0, 7):
+                continue
+
+            (target_path_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            target_path_length = sqlite_help.varint_to_text_length(target_path_length)
+            if target_path_length < 0 or target_path_length > 1024:
+                continue
+            start -= varint_len
+
+            (current_path_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            current_path_length = sqlite_help.varint_to_text_length(current_path_length)
+            if current_path_length < 0 or current_path_length > 1024:
+                continue
+            start -= varint_len
+
+            (id_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            if id_length < 0 or id_length > 1024000:
+                continue
+            start -= varint_len
+
+            (payload_header_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            if payload_header_length < 0 or payload_header_length > 1024000:
+                continue
+            start -= varint_len
+            payload_header_start = start + 1
+
+            (row_id, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            start -= varint_len
+
+            (payload_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            start -= varint_len
+
+            # jump to after opened_length needle match and go forward
+            start = 21
+
+            (referrer_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, FORWARD)
+            referrer_length = sqlite_help.varint_to_text_length(referrer_length)
+            start += varint_len
+
+            # check that the full record length is still longer than the total of some of the longer fields
+            if payload_length < payload_header_length + current_path_length + target_path_length + referrer_length:
+                continue
+
+            # For the next 6 fields:
+            #   if the last fields in the record are null, the fields are sometimes not included at all
+            #   so check if the current position (start) minus the start of the header is greater
+            #   than the size specifed in payload_header_length
+            if start - payload_header_start >= payload_header_length:
+                by_ext_id_length = 0
+            else:
+                (by_ext_id_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, FORWARD)
+                by_ext_id_length = sqlite_help.varint_to_text_length(by_ext_id_length)
+                start += varint_len
+
+            if start - payload_header_start >= payload_header_length:
+                by_ext_name_length = 0
+            else:
+                (by_ext_name_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, FORWARD)
+                by_ext_name_length = sqlite_help.varint_to_text_length(by_ext_name_length)
+                start += varint_len
+
+            if start - payload_header_start >= payload_header_length:
+                etag_length = 0
+            else:
+                (etag_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, FORWARD)
+                etag_length = sqlite_help.varint_to_text_length(etag_length)
+                start += varint_len
+
+            if start - payload_header_start >= payload_header_length:
+                last_modified_length = 0
+            else:
+                (last_modified_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, FORWARD)
+                last_modified_length = sqlite_help.varint_to_text_length(last_modified_length)
+                start += varint_len
+
+            # the mime_type related fields are new to chrome 37, but can be handled the same way
+            if start - payload_header_start >= payload_header_length:
+                mime_type_length = 0
+            else:
+                (mime_type_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, FORWARD)
+                mime_type_length = sqlite_help.varint_to_text_length(mime_type_length)
+                start += varint_len
+
+            if start - payload_header_start >= payload_header_length:
+                original_mime_type_length = 0
+            else:
+                (original_mime_type_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, FORWARD)
+                original_mime_type_length = sqlite_help.varint_to_text_length(original_mime_type_length)
+                start += varint_len
+
+            # end of the payload header.  check that the length found matches the value in the length field
+            payload_header_end = start
+            if payload_header_length != payload_header_end - payload_header_start:
+                continue
+
+            # id field is 0 because it is actually stored in row_id above
+            start += id_length
+
+            current_path_length = int(current_path_length)
+            target_path_length = int(target_path_length)
+            referrer_length = int(referrer_length)
+            etag_length = int(etag_length)
+            last_modified_length = int(last_modified_length)
+            by_ext_id_length = int(by_ext_id_length)
+            by_ext_name_length = int(by_ext_name_length)
+
+            current_path = chrome_buff[start:start+current_path_length]
+            start += current_path_length
+            current_path = current_path.decode('utf-8', errors='ignore')
+
+            target_path = chrome_buff[start:start+target_path_length]
+            start += target_path_length
+            target_path = target_path.decode('utf-8', errors='ignore')
+
+            # extract the time, unpack it to an integer, convert microseconds to string
+            start_time = chrome_buff[start:start+start_time_length]
+            start_time = sqlite_help.sql_unpack(start_time)
+            if str(start_time) < str(11900000000000000) or str(start_time) > str(17000000000000000):
+                continue
+            start_time = sqlite_help.get_wintime_from_msec(start_time)
+            start += start_time_length
+
+            received_bytes = chrome_buff[start:start+received_bytes_length]
+            received_bytes = sqlite_help.sql_unpack(received_bytes)
+            start += received_bytes_length
+
+            total_bytes = chrome_buff[start:start+total_bytes_length]
+            total_bytes = sqlite_help.sql_unpack(total_bytes)
+            start += total_bytes_length
+
+            state =(chrome_buff[start:start+state_length])
+            start += state_length
+            state = state.decode('utf-8', errors='ignore')
+
+            danger_type =(chrome_buff[start:start+danger_type_length])
+            start += danger_type_length
+            danger_type = danger_type.decode('utf-8', errors='ignore')
+
+            interrupt_reason =(chrome_buff[start:start+interrupt_reason_length])
+            start += interrupt_reason_length
+            interrupt_reason = interrupt_reason.decode('utf-8', errors='ignore')
+
+            # extract the time, unpack it to an integer, convert microseconds to string
+            end_time = chrome_buff[start:start+end_time_length]
+            end_time = sqlite_help.sql_unpack(end_time)
+            end_time = sqlite_help.get_wintime_from_msec(end_time)
+            start += end_time_length
+
+            opened =(chrome_buff[start:start+opened_length])
+            start += opened_length
+            opened = opened.decode('utf-8', errors='ignore')
+
+            referrer = chrome_buff[start:start+referrer_length]
+            start += referrer_length
+            referrer = referrer.decode('utf-8', errors='ignore')
+
+            by_ext_id = ""
+            if by_ext_id_length:
+                by_ext_id =(chrome_buff[start:start+by_ext_id_length])
+            start += by_ext_id_length
+            if type(by_ext_id) is bytes:
+                by_ext_id = by_ext_id.decode('utf-8', errors='ignore')
+
+            by_ext_name = ""
+            if by_ext_name_length:
+                by_ext_name = chrome_buff[start:start+by_ext_name_length]
+            start += by_ext_name_length
+            if type(by_ext_name) is bytes:
+                by_ext_name = by_ext_name.decode('utf-8', errors='ignore')
+
+            etag = ""
+            start = int(start)
+            if etag_length:
+                etag = chrome_buff[start:start+etag_length]
+            start += etag_length
+            if type(etag) is bytes:
+                etag = etag.decode('utf-8', errors='ignore')
+
+            last_modified = ""
+            if last_modified_length:
+                last_modified = chrome_buff[start:start+last_modified_length]
+            start += last_modified_length
+            if type(last_modified) is bytes:
+                last_modified = last_modified.decode('utf-8', errors='ignore')
+
+            mime_type = ""
+            if mime_type_length:
+                mime_type = chrome_buff[start:start+mime_type_length]
+            start += mime_type_length
+
+            original_mime_type = ""
+            if original_mime_type_length:
+                original_mime_type = chrome_buff[start:start+original_mime_type_length]
+            start += original_mime_type_length
+
+            downloads[int(offset)] = (
+                                    row_id,
+                                    current_path, 
+                                    target_path, 
+                                    start_time, 
+                                    received_bytes, 
+                                    total_bytes, state, 
+                                    danger_type, 
+                                    interrupt_reason, 
+                                    end_time, 
+                                    opened, 
+                                    referrer, 
+                                    by_ext_id, 
+                                    by_ext_name, 
+                                    etag, 
+                                    last_modified, 
+                                    mime_type, 
+                                    original_mime_type
+                                    )
+
+        seen_tuples = set()
+        for value in downloads.values():
+            if value not in seen_tuples:
+                seen_tuples.add(value)
+                yield 0, (value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7], value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15], value[16], value[17])
+
+    def run(self):
+        return renderers.TreeGrid(
+            [
+                ("row_id", int), 
+                ("current_path", str), 
+                ("target_path", str), 
+                ("start_time", datetime.datetime),
+                ("received_bytes", int), 
+                ("total_bytes", int),
+                ("state", str),
+                ("danger_type", str),
+                ("interrupt_reason", str),
+                ("end_time", datetime.datetime),
+                ("opened", str),
+                ("referrer", str),
+                ("by_ext_id", str),
+                ("by_ext_name", str),
+                ("etag", str),
+                ("last_modified", str),
+                ("mime_type", str),
+                ("original_mime_type", str)
             ], 
             self._generator()
         )
