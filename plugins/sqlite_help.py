@@ -173,12 +173,12 @@ def sql_unpack(buff):
     elif size == 2:
         value = struct.unpack(">h", buff)[0]
     elif size == 3:
-        tmp = "\x00" + buff
+        tmp = b"\x00" + buff
         value = struct.unpack(">l", tmp)[0]
     elif size == 4:
         value = struct.unpack(">l", buff)[0]
     elif size == 6:
-        tmp = "\x00\x00" + buff
+        tmp = b"\x00\x00" + buff
         value = struct.unpack(">q", tmp)[0]
     elif size == 8:
         value = struct.unpack(">q", buff)[0]
