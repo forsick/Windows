@@ -10,6 +10,58 @@ import volatility3.plugins.sqlite_help as sqlite_help
 FORWARD = sqlite_help.FORWARD
 BACKWARD = sqlite_help.BACKWARD
 
+def map_transition(t):
+    """Map the 32-bit integer transition t to the multiple transition types it represents"""
+    transition = ""
+    if (t & 0xFF) == 0:
+        transition += "LINK;"
+    if (t & 0xFF) == 1:
+        transition += "TYPED;"
+    if (t & 0xFF) == 2:
+        transition += "BOOKMARK;"
+    if (t & 0xFF) == 3:
+        transition += "AUTO_SUBFRAME;"
+    if (t & 0xFF) == 4:
+        transition += "MANUAL_SUBFRAME;"
+    if (t & 0xFF) == 5:
+        transition += "GENERATED;"
+    if (t & 0xFF) == 6:
+        transition += "START_PAGE;"
+    if (t & 0xFF) == 7:
+        transition += "FORM_SUBMIT;"
+    if (t & 0xFF) == 8:
+        transition += "RELOAD-RESTORE-UNDO_CLOSE;"
+    if (t & 0xFF) == 9:
+        transition += "KEYWORD;"
+    if (t & 0xFF) == 10:
+        transition += "KEYWORD_GENERATED;"
+
+    if (t & 0x03000000) == 0x03000000:
+        transition += "FORWARD_BACK_FROM_ADDRESS_BAR;"
+    elif (t & 0x03000000) == 0x01000000:
+        transition += "FORWARD_BACK;"
+    elif (t & 0x03000000) == 0x02000000:
+        transition += "FROM_ADDRESS_BAR;"
+
+    if (t & 0x04000000) == 0x04000000:
+        transition += "HOME_PAGE;"
+
+    if (t & 0x30000000) == 0x30000000:
+        transition += "CHAIN_START_END;"
+    elif (t & 0x30000000) == 0x10000000:
+        transition += "CHAIN_START;"
+    elif (t & 0x30000000) == 0x20000000:
+        transition += "CHAIN_END;"
+
+    if (t & 0xC0000000) == 0xC0000000:
+        transition += "CLIENT_SERVER_REDIRECT;"
+    elif (t & 0xC0000000) == 0x40000000:
+        transition += "CLIENT_REDIRECT;"
+    elif (t & 0xC0000000) == 0x80000000:
+        transition += "SERVER_REDIRECT;"
+
+    return transition
+
 class ChromeHistory(interfaces.plugins.PluginInterface):
     """Scans for and parses potential Chrome url history"""
     _required_framework_version = (2, 0, 0)
@@ -495,6 +547,166 @@ class ChromeDownloads(interfaces.plugins.PluginInterface):
                 ("last_modified", str),
                 ("mime_type", str),
                 ("original_mime_type", str)
+            ], 
+            self._generator()
+        )
+    
+class ChromeVisits(interfaces.plugins.PluginInterface):
+    """Scans for and parses potential Chrome download records"""
+    _required_framework_version = (2, 0, 0)
+
+    @classmethod
+    def get_requirements(cls):
+        return [
+            requirements.ModuleRequirement(
+                name="kernel", 
+                description="Memory layer for the kernel", 
+                architectures=["Intel32", "Intel64"]
+            ),
+            requirements.BooleanRequirement(
+                name="nulltime", 
+                description="Don't print entries with null timestamps", 
+                default=False, 
+                optional=True
+            ),
+        ]
+
+    def _generator(self):
+        kernel = self.context.modules[self.config["kernel"]]
+        physical_layer_name = self.context.layers[kernel.layer_name].config.get(
+            "memory_layer", None
+        )
+        layer = self.context.layers[physical_layer_name]
+        needles=[
+                    b'\x08\x00\x01\x06',
+                    b'\x08\x00\x02\x06',
+                    b'\x08\x00\x03\x06',
+                    b'\x08\x00\x08\x06',
+                    b'\x08\x00\x09\x06',
+                    b'\x09\x00\x01\x06',
+                    b'\x09\x00\x02\x06',
+                    b'\x09\x00\x03\x06',
+                    b'\x09\x00\x08\x06',
+                    b'\x09\x00\x09\x06',
+                ]
+        visits = {}
+        
+        for offset, _value in layer.scan(
+            context=self.context,
+            scanner=scan.MultiStringScanner(patterns=needles),
+        ):
+            try:
+                chrome_buff = layer.read(offset - 13, 150)
+            except PagedInvalidAddressException as e:
+                print(f"Unable to read page at offset {offset}: {e}")
+                continue
+
+             # sanity checks on a few other values
+            if chrome_buff[17] not in (1, 2, 3, 8, 9):
+                continue
+            if chrome_buff[18] not in (4, 5):
+                continue
+            if chrome_buff[19] not in (1, 2, 3, 8, 9):
+                continue
+
+            # get the bytes around the needles, then work backwards
+            payload_header_length = (chrome_buff[13])
+            (visit_id_length, visit_id) = sqlite_help.varint_type_to_length(chrome_buff[14])
+            (url_length, url) = sqlite_help.varint_type_to_length(chrome_buff[15])
+
+            # row_id is before the payload_header_length
+            start = 12
+            (row_id, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+            # can't have a negative row_id (index)
+            if row_id < 0:
+                continue
+
+            # payload_length is length of sqlite record and the first item
+            start -= varint_len
+            if start < 0:
+                continue
+            (payload_length, varint_len) = sqlite_help.find_varint(chrome_buff, start, BACKWARD)
+
+            # payload_length should be much longer than this, but this is a safe minimum
+            if payload_length < 6:
+                continue
+
+            # get the remaining needle match and the next few single byte values
+            (visit_time_length, visit_time) = sqlite_help.varint_type_to_length(chrome_buff[16])
+            (from_visit_length, from_visit) = sqlite_help.varint_type_to_length(chrome_buff[17])
+            (transition_length, transition) = sqlite_help.varint_type_to_length(chrome_buff[18])
+            (segment_id_length, segment_id) = sqlite_help.varint_type_to_length(chrome_buff[19])
+
+            # older versions of chrome don't have the is_indexed field
+            if payload_header_length == 9:
+                (is_indexed_length, is_indexed) = sqlite_help.varint_type_to_length(chrome_buff[20])
+                (visit_duration_length, visit_duration) = sqlite_help.varint_type_to_length(chrome_buff[21])
+                start = 22
+            elif payload_header_length == 8:
+                (visit_duration_length, visit_duration) = sqlite_help.varint_type_to_length(chrome_buff[20])
+                start = 21
+            else:
+                continue
+
+            # visit_id INTEGER
+            visit_id = sqlite_help.sql_unpack(chrome_buff[start:start+visit_id_length])
+
+            # url INTEGER (an id into the urls table)
+            start += visit_id_length
+            url = sqlite_help.sql_unpack(chrome_buff[start:start+url_length])
+
+            # visit_time INTEGER
+            start += url_length
+            visit_time = sqlite_help.sql_unpack(chrome_buff[start:start+visit_time_length])
+            visit_time = sqlite_help.get_wintime_from_msec(visit_time)
+            if visit_time.year == 1601:
+                continue
+
+            # from_visit INTEGER
+            start += visit_time_length
+            from_visit = sqlite_help.sql_unpack(chrome_buff[start:start+from_visit_length])
+
+            # transition INTEGER
+            start += from_visit_length
+            transition = sqlite_help.sql_unpack(chrome_buff[start:start+transition_length])
+
+            # segment_id INTEGER
+            start += transition_length
+            segment_id = sqlite_help.sql_unpack(chrome_buff[start:start+segment_id_length])
+
+            # is_index INTEGER
+            start += segment_id_length
+            if payload_header_length == 9:
+                is_indexed = sqlite_help.sql_unpack(chrome_buff[start:start+is_indexed_length])
+
+                # visit_duration INTEGER
+                start += is_indexed_length
+            if visit_duration_length:
+                visit_duration = sqlite_help.sql_unpack(chrome_buff[start:start+visit_duration_length])
+
+            # store all the fields as a tuple to eliminate printing duplicates
+            if payload_header_length == 9:
+                visits[int(offset)] = (row_id, url, visit_time, from_visit, map_transition(transition), segment_id, is_indexed, visit_duration)
+            else:
+                visits[int(offset)] = (row_id, url, visit_time, from_visit, map_transition(transition), segment_id, "n/a", visit_duration)
+
+        seen_tuples = set()
+        for value in visits.values():
+            if value not in seen_tuples:
+                seen_tuples.add(value)
+                yield 0, (value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7])
+
+    def run(self):
+        return renderers.TreeGrid(
+            [
+                ("Visit ID", int), 
+                ("URL ID", int), 
+                ("Visit Time", datetime.datetime),
+                ("From Visit", int), 
+                ("Transition", str),
+                ("Segment ID", int),
+                ("Is Indexed", str),
+                ("Visit Duration", int),
             ], 
             self._generator()
         )
